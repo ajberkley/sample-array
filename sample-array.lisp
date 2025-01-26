@@ -44,17 +44,13 @@
                              summing (row-major-aref distribution idx)))
          (norm-d (make-array num-elts :element-type 'fixnum)))
     (dformat "Total probability weight is ~A~%" total-weight)
-    (values
-     norm-d
-     (floor
-      (loop for idx fixnum below num-elts
-            summing
-            (setf (aref norm-d idx)
-                  (floor
-                   (* +total-dist-weight+
-                      (/ (row-major-aref distribution idx)
-                         total-weight)))))
-      num-elts))))
+    (dotimes (idx num-elts)
+      (setf (aref norm-d idx)
+            (floor
+             (* +total-dist-weight+
+                (/ (row-major-aref distribution idx)
+                   total-weight)))))
+    (values norm-d (floor +max-bin-weight+ num-elts))))
 
 (defstruct bin
   (weight -1 :type fixnum)
@@ -67,11 +63,26 @@
                                               #-debug-sample-array +max-bin-weight+)))
 
 (defun make-sampler (data-array desired-distribution)
-  "data-array and distribution must be arrays of the same total-size (where they are mapped
- by row-major-aref to each other, so they can be multi-dimensional)."
-  (declare (type array data-array) (type array desired-distribution))
+  "Construct an object which can be used with SAMPLE to return
+ elements of DATA-ARRAY with a frequency distribution as found in
+ DESIRED-DISTRIBUTION.
+
+ DATA-ARRAY and DISTRIBUTION must be (potentially multi-dimensional)
+ arrays of the same array-total-size (where they are mapped by
+ row-major-aref to each other, so they do not have to be the same
+ shape).
+
+ The DESIRED-DISTRIBUTION can contain any number types (included
+ mixes).  We attempt to maintain high dynamic range, choosing
+ approximately 52 bits as a target value (the number of bits of
+ mantissa in a double-float, and likely beyond the patience limit of
+ anyone calling this as it would take a single core about 1 year to
+ generate enough numbers to test that dynamic range)"
+  (declare (type array data-array desired-distribution))
   (assert (= (array-total-size data-array) (array-total-size desired-distribution)))
-  ;; First we map to a fixnum domain
+  ;; First we map DISTRIBUTION from whatever input number types to a fixed
+  ;; point representation NORM-D and learn each bin we are sampling from should
+  ;; have a weight of TARGET-BIN-WEIGHT
   (multiple-value-bind (norm-d target-bin-weight)
       (normalize desired-distribution)
     (let* ((num-elts (length norm-d))
@@ -87,7 +98,8 @@
                                (round
                                 (* +max-bin-weight+
                                    (/ alias-cutoff target-bin-weight))))
-                 (dformat "Recording BIN ~A/~A: ~,6f~%" idx alias-idx (/ alias-cutoff target-bin-weight 1f0))
+                 (dformat "Recording BIN ~A/~A: ~,6f~%" idx alias-idx
+                          (/ alias-cutoff target-bin-weight 1f0))
                  (incf final-bin-count)))
         (loop for idx fixnum below num-elts
               for weight fixnum across norm-d
@@ -155,8 +167,9 @@
 
 (defun sample (sampler)
   "Returns an element from the array the sampler was built from obeying the
- requested probability distribution in the sampler.  If num-samples is more
- than one then returns a simple-vector with the results."
+ requested probability distribution in the sampler.  This should work well for
+ high dynamic range probability distributions and takes O(1) time.  It does eat
+ more random bits than is strictly necessary."
   (declare (type sampler& sampler) (optimize speed safety))
   (let* ((idx (random (sampler&-num-elts sampler)))
          (bin-info (sampler&-bin-info sampler))
