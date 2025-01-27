@@ -1,5 +1,5 @@
 (defpackage #:sample-array
-  (:use #:common-lisp #:priority-queue)
+  (:use #:common-lisp)
   (:documentation "Sample from an ARRAY of total-size N with a fixed
  probability distribution described by integer weights.  O(N log N)
  time to build the sampler and O(1) to sample from it.  We consume 52
@@ -45,11 +45,12 @@
          (norm-d (make-array num-elts :element-type 'fixnum)))
     (dformat "Total probability weight is ~A~%" total-weight)
     (dotimes (idx num-elts)
-      (setf (aref norm-d idx)
-            (floor
-             (* +total-dist-weight+
-                (/ (row-major-aref distribution idx)
-                   total-weight)))))
+      (let ((p (row-major-aref distribution idx)))
+        (assert (>= p 0))
+        (setf (aref norm-d idx)
+              (floor
+               (* +total-dist-weight+
+                  (/ p total-weight))))))
     (values norm-d (floor +max-bin-weight+ num-elts))))
 
 (defstruct bin
@@ -86,8 +87,8 @@
   (multiple-value-bind (norm-d target-bin-weight)
       (normalize desired-distribution)
     (let* ((num-elts (length norm-d))
-           (overweight-bins (make-pqueue #'> :key-type 'fixnum :value-type t))
-           (underweight-bins (make-pqueue #'> :key-type 'fixnum :value-type t))
+           (overweight-bins nil)
+           (underweight-bins nil)
            (final-bin-count 0)
            (final-bins (make-array (* 3 num-elts) :element-type 'fixnum)))
       (declare (type (simple-array fixnum (*)) norm-d final-bins))
@@ -111,56 +112,52 @@
                  (cond
                    ((> weight target-bin-weight)
                     (dformat " ~A is overweight~%" bin)
-                    (pqueue-push bin weight overweight-bins))
+                    (push bin overweight-bins))
                    ((< weight target-bin-weight)
                     (dformat " ~A is underweight~%" bin)
-                    (pqueue-push bin (- weight) underweight-bins))
+                    (push bin underweight-bins))
                    (t
                     (record-bin idx idx target-bin-weight))))
-        (loop with underweight-bin and underweight-weight and overweight-bin and overweight-weight
-              while (not (or (pqueue-empty-p underweight-bins)
-                             (pqueue-empty-p overweight-bins)))
+        (loop
+          while (and underweight-bins overweight-bins)
+          do
+          (let* ((underweight-bin (pop underweight-bins))
+                 (overweight-bin (pop overweight-bins))
+                 (underweight-weight (bin-weight underweight-bin))
+                 (overweight-weight (bin-weight overweight-bin)))
+            (dformat "Matching underweight ~A and overweight ~A~%" underweight-bin overweight-bin)
+            (let* ((remaining-overweight-weight (- overweight-weight
+                                                   (- target-bin-weight
+                                                      underweight-weight))))
+              (assert (>= (+ overweight-weight underweight-weight) target-bin-weight))
+              (dformat " assigned ~,6f weight to ~A total ~,6f~%"
+                       (/ (- overweight-weight remaining-overweight-weight) target-bin-weight 1f0)
+                       underweight-bin
+                       (/ (+ (- overweight-weight remaining-overweight-weight) underweight-weight) target-bin-weight 1f0))
+              (setf (bin-weight overweight-bin) remaining-overweight-weight)
+              (cond
+                ((> remaining-overweight-weight target-bin-weight)
+                 (dformat " ~A is still overweight~%" overweight-bin)
+                 (push overweight-bin overweight-bins))
+                ((< remaining-overweight-weight target-bin-weight)
+                 (dformat " ~A is now underweight~%" overweight-bin)
+                 (push overweight-bin underweight-bins))
+                (t
+                 (dformat " ~A is just right~%" overweight-bin)
+                 (record-bin (bin-idx overweight-bin) (bin-idx overweight-bin)
+                             target-bin-weight)))
+              (record-bin (bin-idx underweight-bin) (bin-idx overweight-bin)
+                          underweight-weight))))
+        (loop for bin = (pop underweight-bins)
+              while bin
               do
-                 (setf (values underweight-bin underweight-weight) (pqueue-pop underweight-bins)
-                       (values overweight-bin overweight-weight) (pqueue-pop overweight-bins))
-                 (assert (and underweight-bin overweight-bin))
-                 (setf underweight-weight (- underweight-weight))
-                 (dformat "Matching underweight ~A and overweight ~A~%"
-                         underweight-bin overweight-bin)
-                 (let* ((remaining-overweight-weight (- overweight-weight
-                                                        (- target-bin-weight
-                                                           underweight-weight))))
-                   (assert (>= (+ overweight-weight underweight-weight) target-bin-weight))
-                   (dformat " assigned ~,6f weight to ~A total ~,6f~%"
-                           (/ (- overweight-weight remaining-overweight-weight) target-bin-weight 1f0)
-                           underweight-bin
-                           (/ (+ (- overweight-weight remaining-overweight-weight) underweight-weight) target-bin-weight 1f0))
-                   (setf (bin-weight overweight-bin) remaining-overweight-weight)
-                   (cond
-                     ((> remaining-overweight-weight target-bin-weight)
-                      (dformat " ~A is still overweight~%" overweight-bin)
-                      (pqueue-push overweight-bin remaining-overweight-weight overweight-bins))
-                     ((< remaining-overweight-weight target-bin-weight)
-                      (dformat " ~A is now underweight~%" overweight-bin)
-                      (pqueue-push overweight-bin (- remaining-overweight-weight)
-                                   underweight-bins))
-                     (t
-                      (dformat " ~A is just right~%" overweight-bin)
-                      (record-bin (bin-idx overweight-bin) (bin-idx overweight-bin)
-                                  target-bin-weight)))
-                   (record-bin (bin-idx underweight-bin) (bin-idx overweight-bin)
-                               underweight-weight))
-              finally
-                 (loop while (not (pqueue-empty-p underweight-bins))
-                       for bin = (pqueue-pop underweight-bins)
-                       do
-                          (dformat "Not perfectly weighted bin ~A~%" bin)
-                          (record-bin (bin-idx bin) (bin-idx bin) target-bin-weight))
-                 (loop while (not (pqueue-empty-p overweight-bins))
-                       for bin = (pqueue-pop overweight-bins)
-                       do
-                          (dformat "Not perfectly weighted bin ~A~%" bin)
-                          (record-bin (bin-idx bin) (bin-idx bin) target-bin-weight)))
+              (dformat "Not perfectly weighted bin ~A~%" bin)
+              (record-bin (bin-idx bin) (bin-idx bin) target-bin-weight))
+        (loop for bin = (pop overweight-bins)
+              while bin
+              do
+              (dformat "Not perfectly weighted bin ~A~%" bin)
+              (record-bin (bin-idx bin) (bin-idx bin) target-bin-weight))
         (assert (= (* 3 final-bin-count) (length final-bins)))
         (make-sampler& :num-elts num-elts :source-array data-array :bin-info final-bins)))))
 
